@@ -113,7 +113,7 @@ class Kind:
 
         def handler(request: httpx.Request) -> httpx.Response:
             number = int(request.url.params["page"])
-            items = [self.item(t) for t in pages[number]]
+            items = [self.item(t) for t in pages.get(number, [])]
             return httpx.Response(
                 200,
                 json=page_body(items, page=number, total_pages=total_pages),
