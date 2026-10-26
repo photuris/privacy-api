@@ -54,6 +54,8 @@ API, published as a private GitHub repo and consumed by
 ## Public surface
 
 ```python
+from datetime import date
+
 from privacy_api import Client, PrivacyError, Card, Transaction, Page
 
 with Client() as client:                 # key from PRIVACY_API_KEY
