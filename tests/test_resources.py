@@ -227,6 +227,7 @@ def test_transactions_list_defaults(transaction_json: JsonDict) -> None:
 
     client.transactions.list()
 
+    assert requests[0].method == "GET"
     assert query(requests[0]) == {"page": "1", "page_size": "50"}
 
 
@@ -466,6 +467,7 @@ def test_cards_list_string_date(card_json: JsonDict) -> None:
 
     page = client.cards.list(begin="2026-01-01")
 
+    assert requests[0].method == "GET"
     assert requests[0].url.path.endswith("/cards")
     assert query(requests[0]) == {
         "begin": "2026-01-01",
