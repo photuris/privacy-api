@@ -19,6 +19,7 @@ from privacy_api.errors import (
     from_response,
     parse_retry_after,
 )
+from privacy_api.resources import Cards, FundingSources, Transactions
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,9 @@ class Client:
             timeout=timeout,
             transport=transport,
         )
+        self.cards = Cards(self)
+        self.funding_sources = FundingSources(self)
+        self.transactions = Transactions(self)
 
     def status(self) -> str:
         """Return the API status message.
