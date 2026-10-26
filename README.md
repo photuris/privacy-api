@@ -9,12 +9,15 @@ A small, typed, synchronous Python client for the
 A paid Privacy plan is required to get an API key. Free accounts cannot
 use the API.
 
+This is an unofficial client, not affiliated with or endorsed by
+Privacy.com. MIT licensed.
+
 ## Install
 
-From a git source (this repo is private):
+From git (not on PyPI):
 
 ```bash
-uv add "privacy-api @ git+ssh://git@github.com/photuris/privacy-api.git"
+uv add "privacy-api @ git+https://github.com/photuris/privacy-api.git"
 ```
 
 For local development, run `uv sync`.
