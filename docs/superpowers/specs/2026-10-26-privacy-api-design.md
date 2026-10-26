@@ -33,8 +33,14 @@ API, published as a private GitHub repo and consumed by
 - A transaction in a list response carries a nested `card` object;
   the OpenAPI schema lists `card_token`. Treat both as optional and
   derive `card_token` from `card.token` when absent.
-- `pan` and `cvv` appear only on single-card responses (get, create,
-  share), never in list responses.
+- `pan` and `cvv` are documented for single-card responses (get,
+  create, update, share). The guide says they are absent from list
+  responses, but the transactions reference example embeds them in the
+  nested `card`. Treat both as optional everywhere and preserve them
+  whenever present.
+- `GET /funding_sources` is not paginated: its only query parameter is
+  `account_token`, and the response's `page` and `total_pages` are
+  documented as always 1. Sending `page` or `page_size` is unsupported.
 
 ## Package
 
@@ -89,9 +95,10 @@ class Client:
                  json: dict[str, Any] | None = None) -> Any
 ```
 
-- `api_key` None falls back to `os.environ[ENV_API_KEY]`; still None
-  or empty raises `AuthError("No API key: pass api_key= or set
-  PRIVACY_API_KEY")`.
+- `api_key` None falls back to `os.environ.get(ENV_API_KEY)`. Only
+  None triggers the fallback: an explicit `""` does not. If the chosen
+  value is None or `""`, raise `AuthError("No API key: pass api_key=
+  or set PRIVACY_API_KEY")`.
 - `base_url` wins over `sandbox`; `sandbox=True` selects `SANDBOX_URL`;
   default `PRODUCTION_URL`. Trailing slash stripped.
 - One `httpx.Client` built in `__init__` with headers
@@ -102,16 +109,26 @@ class Client:
 - `_request` is the only place httpx is called. It returns
   `response.json()` for 2xx. For non-2xx it raises the error from
   `errors.from_response`.
-- Retries apply only when `method == "GET"`. Retry on `429`, any
-  `5xx`, and `httpx.TransportError`. Attempts are `max_retries + 1`.
-  Delay before attempt `n` (n starting at 1) is
-  `min(0.5 * 2 ** (n - 1), 8.0) + random.uniform(0, 0.25)` seconds,
-  unless the response carries a `Retry-After` header parseable as a
-  number, in which case that many seconds. Sleep via `time.sleep`
-  (tests monkeypatch `privacy_api.client.time.sleep`). Log each retry
-  at WARNING with method, path, status or exception, and delay. When
-  attempts are exhausted raise the last mapped error. Non-GET
-  methods raise on the first failure.
+- Retries apply only when `method == "GET"`. Retryable failures are
+  a `429` response, any `5xx` response, and `httpx.TransportError`.
+  The initial request is attempt 0 and is sent immediately with no
+  sleep. Total attempts are `max_retries + 1`; `max_retries=0` means
+  one request and no sleep. After a retryable failure, if another
+  attempt remains, sleep then retry; retry number `r` (r starting at
+  1) sleeps `min(0.5 * 2 ** (r - 1), 8.0) + random.uniform(0, 0.25)`
+  seconds, so with zero jitter the sequence is 0.5, 1, 2, 4, 8, 8.
+  When the failed response (429 or 5xx alike) carries a `Retry-After`
+  header whose value parses with `float()` to a finite number >= 0,
+  that number replaces the whole delay, jitter included; any other
+  value (absent, non-numeric, negative, NaN, inf) uses the backoff.
+  Sleep via `time.sleep` and jitter via `random.uniform`, both looked
+  up on the modules at call time (tests monkeypatch
+  `privacy_api.client.time.sleep` and `privacy_api.client.random.uniform`).
+  Never sleep after the last attempt. Log each retry at WARNING with
+  method, path, status or exception class, and delay. When attempts
+  are exhausted raise the mapped error of the last failure. Non-GET
+  methods (POST, PATCH, and any other) make exactly one request and
+  raise on the first failure, for responses and transport errors alike.
 - `status()` calls `GET /status` and returns `data["message"]`.
 - Module logger `logging.getLogger(__name__)`; DEBUG line per request
   with method, path, status.
@@ -132,19 +149,27 @@ class ServerError(PrivacyError)       # >= 500
 def from_response(response: httpx.Response) -> PrivacyError
 ```
 
-- `from_response` parses JSON `message` and `debugging_request_id`
-  when the body is JSON with those keys; otherwise `message` is
-  `"HTTP <status>"` and the id is None. Any other 4xx maps to
-  `PrivacyError`. `str(err)` is the message. `RateLimitError.retry_after`
-  is the parsed `Retry-After` header or None.
+- `from_response` decodes the body as JSON. If the result is a dict,
+  each field is taken independently: `message` is the body's
+  `message` when that is a str, else `"HTTP <status>"`;
+  `debugging_request_id` is the body's `debugging_request_id` when
+  that is a str, else None. If the body is not valid JSON or decodes
+  to a non-dict (list, null, string, number), `message` is
+  `"HTTP <status>"` and the id is None. Any status not listed above
+  maps to `PrivacyError`. `str(err)` is the message.
+  `RateLimitError.retry_after` is the `Retry-After` header parsed with
+  `float()` when that yields a finite number >= 0, else None.
 
 ### `models.py`
 
-All models subclass `_Model(BaseModel)` with
-`model_config = ConfigDict(extra="allow")`. Enum-valued fields are
-plain `str` so an unknown value from the API never breaks parsing.
-Datetimes: a `field_validator` on every `datetime` field sets
-`tzinfo=UTC` when the parsed value is naive.
+All models, `Page` included, subclass `_Model(BaseModel)` with
+`model_config = ConfigDict(extra="allow")`, so unknown fields survive
+`model_dump()`. Enum-valued fields are plain `str` so an unknown value
+from the API never breaks parsing. Datetimes: a `field_validator`
+(mode "after") on every `datetime` and `datetime | None` field in
+every model sets `tzinfo=UTC` when the parsed value is naive and
+leaves None as None. Pydantic parses `"2020-07-08 17:57:36"` as a
+naive datetime without help.
 
 ```python
 class FundingSource(_Model):
@@ -185,10 +210,12 @@ class Transaction(_Model):
     merchant: Merchant | None = None
     events: list[Event] = []
     funding: list[Funding] = []
-    # model_validator(mode="after"): if card_token is None and card is
-    # not None, set card_token = card.token.
+    # model_validator(mode="after"): if card_token is None (missing or
+    # explicit null) and card is not None, set card_token = card.token.
+    # Any other explicit card_token value is kept even when it differs
+    # from card.token.
 
-class Page(BaseModel, Generic[T]):
+class Page(_Model, Generic[T]):
     data: list[T]; page: int; total_entries: int; total_pages: int
 ```
 
@@ -218,8 +245,8 @@ class Cards:
               theme: str | None = None) -> Card
 
 class FundingSources:
-    def list(self, *, page: int = 1, page_size: int = 50) -> Page[FundingSource]
-    def iter(self, *, page_size: int = 100) -> Iterator[FundingSource]
+    def list(self) -> Page[FundingSource]      # one GET, no query params
+    def iter(self) -> Iterator[FundingSource]  # yields from list().data
 
 class Transactions:
     def list(self, *, card_token: str | None = None, result: str | None = None,
@@ -229,11 +256,18 @@ class Transactions:
              page_size: int = 100) -> Iterator[Transaction]
 ```
 
-- `create`, `update`, `share` send only the keyword arguments that are
-  not None in the JSON body (`type` and `recipient_email` always).
-- `iter` fetches page 1, yields `data`, then continues with page 2,
-  3, ... while `page < total_pages`. It stops immediately when `data`
-  is empty. One request per page; nothing is prefetched.
+- `create`, `update`, `share` send every keyword argument whose value
+  is not None in the JSON body, falsy values included (`spend_limit=0`
+  and `memo=""` are sent); `type` and `recipient_email` always.
+- `Cards.iter` and `Transactions.iter` are generators: no request is
+  made until the first item is pulled. They fetch page 1 with the
+  supplied filters and `page_size`, yield every item of `data` in
+  order, and then, while the page just fetched has `page <
+  total_pages`, fetch the next page with the same filters and
+  `page_size` and yield its items. A page whose `data` is empty ends
+  the iteration immediately, whatever `total_pages` says. One request
+  per page; nothing is prefetched. `FundingSources.iter` yields the
+  items of the single `list()` call.
 - `Client.__init__` attaches `self.cards = Cards(self)`,
   `self.funding_sources = FundingSources(self)`,
   `self.transactions = Transactions(self)`.
