@@ -14,7 +14,7 @@ use the API.
 From a git source (this repo is private):
 
 ```bash
-uv add "privacy-api @ git+ssh://git@github.com/<owner>/privacy-api.git"
+uv add "privacy-api @ git+ssh://git@github.com/photuris/privacy-api.git"
 ```
 
 For local development, run `uv sync`.
